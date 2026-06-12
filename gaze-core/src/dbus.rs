@@ -164,7 +164,7 @@ pub trait Gaze {
     async fn enroll_start(&self, face_name: &str) -> zbus::Result<()>;
     async fn enroll_stop(&self) -> zbus::Result<()>;
 
-    async fn list_faces(&self, username: &str) -> zbus::Result<Vec<(String, u32)>>;
+    async fn list_faces(&self, username: &str) -> zbus::Result<Vec<(String, u32, bool, bool)>>;
     async fn delete_face(&self, username: &str, face_name: &str) -> zbus::Result<bool>;
     async fn rename_face(
         &self,
@@ -191,7 +191,9 @@ pub trait Gaze {
     fn verify_status(
         &self,
         result: VerifyResult,
-        faces: Vec<(String, f64, f64, bool, u32)>,
+        faces: Vec<(String, f64, f64, bool, f64, f64, bool)>,
+        rgb_status: CaptureStatus,
+        ir_status: CaptureStatus,
     ) -> zbus::Result<()>;
 
     #[zbus(signal)]

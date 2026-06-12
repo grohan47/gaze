@@ -186,6 +186,8 @@ pub struct AuthConfig {
     pub abort_if_lid_closed: bool,
     #[serde(default = "default_false")]
     pub require_confirmation: bool,
+    #[serde(default)]
+    pub hybrid_policy: String,
 }
 
 fn default_false() -> bool {
@@ -220,6 +222,7 @@ impl Default for AuthConfig {
             abort_if_ssh: true,
             abort_if_lid_closed: true,
             require_confirmation: false,
+            hybrid_policy: String::new(),
         }
     }
 }
@@ -288,6 +291,19 @@ impl Config {
         std::fs::rename(&tmp_path, path)
             .with_context(|| format!("failed to replace config file: {}", path.display()))?;
         Ok(())
+    }
+
+    pub fn hybrid_policy(&self) -> &str {
+        if !self.auth.hybrid_policy.is_empty() {
+            self.auth.hybrid_policy.as_str()
+        } else {
+            match self.security.level.as_str() {
+                "low" => "or",
+                "medium" => "fallback_on_dark",
+                "high" | "maximum" => "and",
+                _ => "fallback_on_dark",
+            }
+        }
     }
 }
 
@@ -388,7 +404,7 @@ mod tests {
             security: SecurityLevel::high(),
             cameras: CameraConfig {
                 rgb: "primary".to_string(),
-                ir: "/dev/video2".to_string(),
+                ir: "pipewiresrc target-object=some-ir-camera".to_string(),
                 emitter_enabled: true,
                 dark_luma_threshold: 55,
             },
@@ -396,6 +412,7 @@ mod tests {
                 abort_if_ssh: true,
                 abort_if_lid_closed: false,
                 require_confirmation: true,
+                hybrid_policy: String::new(),
             },
             enrollment: EnrollmentConfig { max_templates: 8 },
             liveness: LivenessConfig {
@@ -414,7 +431,10 @@ mod tests {
             SecurityLevel::high().recognizer()
         );
         assert_eq!(loaded.cameras.rgb, "primary");
-        assert_eq!(loaded.cameras.ir, "/dev/video2");
+        assert_eq!(
+            loaded.cameras.ir,
+            "pipewiresrc target-object=some-ir-camera"
+        );
         assert!(loaded.cameras.emitter_enabled);
         assert_eq!(loaded.cameras.dark_luma_threshold, 55);
         assert!(loaded.auth.abort_if_ssh);
@@ -475,5 +495,30 @@ mod tests {
         assert!(config.auth.abort_if_lid_closed);
         assert!(!config.auth.require_confirmation);
         assert_eq!(config.enrollment.max_templates, 2);
+    }
+
+    #[test]
+    fn hybrid_policy_mappings() {
+        let mut config = Config::default();
+
+        // Test defaults based on security level when hybrid_policy is empty
+        config.security.level = "low".to_string();
+        assert_eq!(config.hybrid_policy(), "or");
+
+        config.security.level = "medium".to_string();
+        assert_eq!(config.hybrid_policy(), "fallback_on_dark");
+
+        config.security.level = "high".to_string();
+        assert_eq!(config.hybrid_policy(), "and");
+
+        config.security.level = "maximum".to_string();
+        assert_eq!(config.hybrid_policy(), "and");
+
+        config.security.level = "unknown".to_string();
+        assert_eq!(config.hybrid_policy(), "fallback_on_dark");
+
+        // Test explicit override
+        config.auth.hybrid_policy = "custom_policy".to_string();
+        assert_eq!(config.hybrid_policy(), "custom_policy");
     }
 }
