@@ -639,6 +639,7 @@ enum VerifyMsg {
 
 fn status_priority(status: CaptureStatus) -> u32 {
     match status {
+        CaptureStatus::Usable => 5,
         CaptureStatus::Ready => 4,
         CaptureStatus::NotCentered
         | CaptureStatus::TooFar
@@ -659,7 +660,7 @@ fn process_frame_sync(
     let (status, result_opt) =
         checker.capture_status_with_spectrum(frame, spectrum, check_centering_and_proximity)?;
 
-    if matches!(status, CaptureStatus::Clipped) {
+    if status != CaptureStatus::Usable {
         return Ok((status, None));
     }
 
@@ -953,8 +954,6 @@ impl AuthDaemon {
         let ir_node = self.ir_node.lock().await.clone();
         let emitter_enabled = *self.emitter_enabled.lock().await;
         let liveness_cfg = self.liveness_config.lock().await.clone();
-        let rgb_dark_threshold = config.cameras.dark_luma_threshold;
-
         let conn = ctxt.connection().clone();
         let path = ctxt.path().to_owned();
 
@@ -1015,7 +1014,6 @@ impl AuthDaemon {
                 let liveness_enabled = liveness_cfg.enabled;
                 let liveness_threshold = liveness_cfg.threshold;
                 let rgb_device_clone = rgb_device.clone();
-                let rgb_dark_threshold = rgb_dark_threshold;
 
                 rgb_thread = Some(std::thread::spawn(move || {
                     let mut cam = match Camera::open(&rgb_device_clone) {
@@ -1028,20 +1026,40 @@ impl AuthDaemon {
 
                     let mut live_scores: Vec<f32> = Vec::new();
                     let mut landmark_seq: Vec<[(f32, f32); 5]> = Vec::new();
+                    let mut saved_count = 0;
 
-                    while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                        let frame = match cam.capture_frame() {
-                            Ok(f) => f,
-                            Err(_) => {
-                                std::thread::sleep(Duration::from_millis(33));
-                                continue;
+                    for frame in &mut cam {
+                        if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+
+                        if saved_count < 30 {
+                            use opencv::prelude::*;
+                            let mut rgb_mat = opencv::core::Mat::default();
+                            if opencv::imgproc::cvt_color_def(&frame, &mut rgb_mat, opencv::imgproc::COLOR_BGR2RGB).is_ok()
+                                && let Ok(sz) = rgb_mat.size()
+                            {
+                                let total_bytes = (sz.width * sz.height * 3) as usize;
+                                let mut img_bytes = vec![0u8; total_bytes];
+                                unsafe {
+                                    std::ptr::copy_nonoverlapping(rgb_mat.data(), img_bytes.as_mut_ptr(), total_bytes);
+                                }
+                                if let Some(img) = image::RgbImage::from_raw(sz.width as u32, sz.height as u32, img_bytes) {
+                                    let path = format!("/etc/gaze/gaze_rgb_{saved_count}.png");
+                                    match img.save(&path) {
+                                        Ok(_) => {
+                                            tracing::info!("Saved RGB capture frame to {}", path);
+                                            saved_count += 1;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Failed to save RGB capture frame to {}: {}", path, e);
+                                        }
+                                    }
+                                }
                             }
-                        };
+                        }
 
-                        let is_dark = gaze_core::face::is_dark_frame(&frame, rgb_dark_threshold).unwrap_or(true);
-                        let (mut status, mut embed_opt) = if is_dark {
-                            (CaptureStatus::TooDark, None)
-                        } else {
+                        let (status, embed_opt) = {
                             let mut checker = checker_rgb_arc.blocking_lock();
                             let mut recognizer = recognizer_rgb_arc.blocking_lock();
                             match process_frame_sync(&mut checker, &mut recognizer, &frame, Spectrum::Rgb, false) {
@@ -1050,19 +1068,10 @@ impl AuthDaemon {
                             }
                         };
 
-                        if status == CaptureStatus::Ready && let Some(ref data) = embed_opt {
-                            let bbox = (data.bbox[0], data.bbox[1], data.bbox[2], data.bbox[3]);
-                            let is_face_dark = gaze_core::face::is_dark_face(&frame, bbox, rgb_dark_threshold).unwrap_or(true);
-                            if is_face_dark {
-                                status = CaptureStatus::TooDark;
-                                embed_opt = None;
-                            }
-                        }
-
                         let latest_embed = embed_opt.as_ref().map(|d| d.embedding.clone());
                         let _ = tx.try_send(VerifyMsg::Status(Spectrum::Rgb, status, latest_embed));
 
-                        if status == CaptureStatus::Ready && let Some(data) = embed_opt {
+                        if status == CaptureStatus::Usable && let Some(data) = embed_opt {
                             let threshold = *threshold_arc.blocking_lock();
                             let db = db_arc.blocking_lock();
                             let scores = match db.match_faces(&username_clone, &data.embedding, threshold, Spectrum::Rgb) {
@@ -1108,8 +1117,6 @@ impl AuthDaemon {
                                 }
                             }
                         }
-
-                        std::thread::sleep(Duration::from_millis(33));
                     }
                 }));
             }
@@ -1149,14 +1156,10 @@ impl AuthDaemon {
 
                     let mut landmark_seq: Vec<[(f32, f32); 5]> = Vec::new();
 
-                    while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                        let frame = match cam.capture_frame() {
-                            Ok(f) => f,
-                            Err(_) => {
-                                std::thread::sleep(Duration::from_millis(33));
-                                continue;
-                            }
-                        };
+                    for frame in &mut cam {
+                        if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
 
                         let (status, embed_opt) = {
                             let mut checker = checker_ir_arc.blocking_lock();
@@ -1170,7 +1173,7 @@ impl AuthDaemon {
                         let latest_embed = embed_opt.as_ref().map(|d| d.embedding.clone());
                         let _ = tx.try_send(VerifyMsg::Status(Spectrum::Ir, status, latest_embed));
 
-                        if status == CaptureStatus::Ready && let Some(data) = embed_opt {
+                        if status == CaptureStatus::Usable && let Some(data) = embed_opt {
                             let threshold = *threshold_arc.blocking_lock();
                             let db = db_arc.blocking_lock();
                             let scores = match db.match_faces(&username_clone, &data.embedding, threshold, Spectrum::Ir) {
@@ -1199,8 +1202,6 @@ impl AuthDaemon {
                                 }
                             }
                         }
-
-                        std::thread::sleep(Duration::from_millis(33));
                     }
                 }));
             }
@@ -1453,12 +1454,14 @@ impl AuthDaemon {
         let db_arc = self.db.clone();
 
         let config = Config::load_from(CONFIG_PATH).unwrap_or_default();
-        let rgb_device = self.rgb_device.lock().await.clone();
-        let ir_device = self.ir_device.lock().await.clone();
-        let ir_node = self.ir_node.lock().await.clone();
-        let emitter_enabled = *self.emitter_enabled.lock().await;
-        let rgb_dark_threshold = config.cameras.dark_luma_threshold;
-
+        let rgb_device = resolve_rgb_source(&config.cameras).unwrap_or_default();
+        let ir_res = resolve_ir_source(&config.cameras);
+        let (ir_device, ir_node) = if let Some((src, node)) = ir_res {
+            (src, node)
+        } else {
+            (String::new(), String::new())
+        };
+        let emitter_enabled = config.cameras.emitter_enabled;
         let conn = ctxt.connection().clone();
         let path = ctxt.path().to_owned();
 
@@ -1513,7 +1516,6 @@ impl AuthDaemon {
                 let completed_steps_clone = completed_steps_atomic.clone();
                 let rgb_device_clone = rgb_device.clone();
                 let rgb_captured_for_step_clone = rgb_captured_for_step.clone();
-                let rgb_dark_threshold = rgb_dark_threshold;
 
                 rgb_thread = Some(std::thread::spawn(move || {
                     let mut cam = match Camera::open(&rgb_device_clone) {
@@ -1529,7 +1531,10 @@ impl AuthDaemon {
                     let mut stable_frames = 0;
                     let mut last_kpss: Option<ndarray::Array3<f32>> = None;
 
-                    while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    for frame in &mut cam {
+                        if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
                         let current_step = completed_steps_clone.load(std::sync::atomic::Ordering::Relaxed) as usize;
                         if current_step >= max_steps as usize {
                             break;
@@ -1549,14 +1554,6 @@ impl AuthDaemon {
 
                         let prompt = prompts[current_step];
 
-                        let frame = match cam.capture_frame() {
-                            Ok(f) => f,
-                            Err(_) => {
-                                std::thread::sleep(Duration::from_millis(33));
-                                continue;
-                            }
-                        };
-
                         let (status, result_opt) = {
                             let mut checker = checker_rgb_arc.blocking_lock();
                             let mut recognizer = recognizer_rgb_arc.blocking_lock();
@@ -1568,7 +1565,7 @@ impl AuthDaemon {
 
                         let _ = tx.try_send(EnrollMsg::Status(current_step, Spectrum::Rgb, status));
 
-                        if status == CaptureStatus::Ready && let Some(data) = result_opt {
+                        if status == CaptureStatus::Usable && let Some(data) = result_opt {
                             let is_stable = if let Some(prev_kps) = last_kpss.as_ref() {
                                 let cur_kps = &data.kpss;
                                 let delta: f32 = cur_kps.iter().zip(prev_kps.iter()).map(|(c, p)| (c - p).abs()).sum();
@@ -1601,17 +1598,11 @@ impl AuthDaemon {
                             };
 
                             if is_stable && pose_matches {
-                                 let bbox = (data.bbox[0], data.bbox[1], data.bbox[2], data.bbox[3]);
-                                 let is_dark = gaze_core::face::is_dark_face(&frame, bbox, rgb_dark_threshold).unwrap_or(true);
-                                 if !is_dark {
-                                    rgb_captured_for_step_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    let _ = tx.blocking_send(EnrollMsg::Captured(current_step, Spectrum::Rgb, data.embedding));
-                                    captured_for_step = true;
-                                }
+                                rgb_captured_for_step_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+                                let _ = tx.blocking_send(EnrollMsg::Captured(current_step, Spectrum::Rgb, data.embedding));
+                                captured_for_step = true;
                             }
                         }
-
-                        std::thread::sleep(Duration::from_millis(33));
                     }
                 }));
             }
@@ -1646,7 +1637,10 @@ impl AuthDaemon {
                     let mut stable_frames = 0;
                     let mut last_kpss: Option<ndarray::Array3<f32>> = None;
 
-                    while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    for frame in &mut cam {
+                        if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
                         let current_step = completed_steps_clone.load(std::sync::atomic::Ordering::Relaxed) as usize;
                         if current_step >= max_steps as usize {
                             break;
@@ -1666,14 +1660,6 @@ impl AuthDaemon {
 
                         let prompt = prompts[current_step];
 
-                        let frame = match cam.capture_frame() {
-                            Ok(f) => f,
-                            Err(_) => {
-                                std::thread::sleep(Duration::from_millis(33));
-                                continue;
-                            }
-                        };
-
                         let (status, result_opt) = {
                             let mut checker = checker_ir_arc.blocking_lock();
                             let mut recognizer = recognizer_ir_arc.blocking_lock();
@@ -1685,7 +1671,7 @@ impl AuthDaemon {
 
                         let _ = tx.try_send(EnrollMsg::Status(current_step, Spectrum::Ir, status));
 
-                        if status == CaptureStatus::Ready && let Some(data) = result_opt {
+                        if status == CaptureStatus::Usable && let Some(data) = result_opt {
                             let is_stable = if run_rgb {
                                 rgb_captured_for_step_clone.load(std::sync::atomic::Ordering::Relaxed)
                             } else if let Some(prev_kps) = last_kpss.as_ref() {
@@ -1726,8 +1712,6 @@ impl AuthDaemon {
                                 captured_for_step = true;
                             }
                         }
-
-                        std::thread::sleep(Duration::from_millis(33));
                     }
                 }));
             }

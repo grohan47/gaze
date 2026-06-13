@@ -47,11 +47,10 @@ impl CameraFeed {
                 }
             };
 
-            while !stop_clone.load(Ordering::Relaxed) {
-                let Ok(frame) = cam.capture_frame() else {
-                    thread::sleep(std::time::Duration::from_millis(33));
-                    continue;
-                };
+            for frame in &mut cam {
+                if stop_clone.load(Ordering::Relaxed) {
+                    break;
+                }
 
                 let Ok(bytes) = frame_to_bytes(&frame) else {
                     continue;
@@ -78,7 +77,6 @@ impl CameraFeed {
                     Err(TrySendError::Full(_)) => {}
                     Err(TrySendError::Disconnected(_)) => break,
                 }
-                thread::sleep(std::time::Duration::from_millis(33));
             }
         });
 
@@ -128,7 +126,7 @@ impl CameraFeed {
                     | CaptureStatus::Clipped
                     | CaptureStatus::TooFar
                     | CaptureStatus::TooClose => (1.0, 0.8, 0.2, 0.7),
-                    CaptureStatus::Ready => (0.2, 0.9, 0.4, 0.85),
+                    CaptureStatus::Ready | CaptureStatus::Usable => (0.2, 0.9, 0.4, 0.85),
                 }
             } else {
                 (0.6, 0.6, 0.6, 0.4)
@@ -176,7 +174,7 @@ impl CameraFeed {
                     CaptureStatus::Clipped => "Face Clipped",
                     CaptureStatus::TooFar => "Come Closer",
                     CaptureStatus::TooClose => "Back Up",
-                    CaptureStatus::Ready => "Ready",
+                    CaptureStatus::Ready | CaptureStatus::Usable => "Ready",
                 };
                 cr.set_font_size(min_dim * 0.035);
                 if let Ok(extents) = cr.text_extents(label) {
