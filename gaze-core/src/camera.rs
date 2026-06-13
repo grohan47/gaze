@@ -11,23 +11,19 @@ pub enum CameraKind {
     Ir { source: String, node: String },
 }
 
+#[derive(Debug, Clone)]
+pub struct ConfiguredCameraSources {
+    pub rgb: String,
+    pub ir: String,
+    pub ir_node: String,
+}
+
 pub fn resolve_ir_source(cameras: &CameraConfig) -> Option<(String, String)> {
     let ir = cameras.ir.trim();
     if ir.is_empty() {
         None
-    } else if ir == "primary" {
-        if let Ok(list) = enumerate_ir_cameras() {
-            if let Some((_name, source)) = list.into_iter().next() {
-                let node = resolve_node_for_source(&source).unwrap_or_default();
-                Some((source, node))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
     } else {
-        let node = resolve_node_for_source(ir).unwrap_or_default();
+        let node = resolve_node(ir).unwrap_or_default();
         Some((ir.to_string(), node))
     }
 }
@@ -41,8 +37,22 @@ pub fn resolve_rgb_source(cameras: &CameraConfig) -> Option<String> {
     }
 }
 
-/// Resolve the capture source and kind from config. A set `cameras.ir` wins,
-/// capturing through GStreamer on that source instead of RGB.
+pub fn resolve_configured_sources(cameras: &CameraConfig) -> ConfiguredCameraSources {
+    let rgb = resolve_rgb_source(cameras).unwrap_or_default();
+    let (ir, ir_node) = resolve_ir_source(cameras).unwrap_or_default();
+    ConfiguredCameraSources { rgb, ir, ir_node }
+}
+
+pub fn preferred_capture_source(cameras: &CameraConfig) -> (String, bool) {
+    if let Some(rgb_source) = resolve_rgb_source(cameras) {
+        (rgb_source, false)
+    } else if let Some((ir_source, _)) = resolve_ir_source(cameras) {
+        (ir_source, true)
+    } else {
+        (DEFAULT_RGB_CAMERA.to_string(), false)
+    }
+}
+
 pub fn resolve_source(cameras: &CameraConfig) -> (String, CameraKind) {
     if let Some((ir_source, ir_node)) = resolve_ir_source(cameras) {
         (
@@ -59,8 +69,7 @@ pub fn resolve_source(cameras: &CameraConfig) -> (String, CameraKind) {
     }
 }
 
-/// Resolve the `/dev/video*` node path corresponding to a GStreamer/PipeWire camera source string.
-pub fn resolve_node_for_source(source: &str) -> Option<String> {
+pub fn resolve_node(source: &str) -> Option<String> {
     let source = source.trim();
     if source.is_empty() {
         return None;
@@ -388,7 +397,7 @@ mod tests {
             rgb: "primary".to_string(),
             ir: String::new(),
             emitter_enabled: false,
-            dark_luma_threshold: 70,
+            dark_luma_threshold: 30,
         };
         let (source, kind) = resolve_source(&cameras);
         assert_eq!(source, "primary");
@@ -406,7 +415,7 @@ mod tests {
             rgb: "primary".to_string(),
             ir: "/dev/video2".to_string(),
             emitter_enabled: true,
-            dark_luma_threshold: 70,
+            dark_luma_threshold: 30,
         };
         let (source, kind) = resolve_source(&cameras);
         assert_eq!(source, "/dev/video2");
@@ -425,7 +434,7 @@ mod tests {
             rgb: "primary".to_string(),
             ir: "pipewiresrc target-object=device-name".to_string(),
             emitter_enabled: true,
-            dark_luma_threshold: 70,
+            dark_luma_threshold: 30,
         };
         let (source, kind) = resolve_source(&cameras);
         assert_eq!(source, "pipewiresrc target-object=device-name");
