@@ -445,7 +445,6 @@ jobs:
 
   dispatch-packages:
     name: Dispatch packages to self-hosted repo
-    if: ${{ false }} # Temporary: disable self-hosted publish for v0.1.0 compatibility run
     runs-on: ubuntu-latest
     # Must wait for build-flatpak too: the packages repo downloads ALL of this
     # run's artifacts by run_id when the dispatch lands, so every artifact
