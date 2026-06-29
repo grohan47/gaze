@@ -262,6 +262,11 @@ impl FaceDetector {
             }
         }
 
+        tracing::debug!(
+            "Face detection completed: found {} face(s)",
+            final_bboxes.nrows()
+        );
+
         Ok((final_bboxes, final_kpss, mat_rgb))
     }
 }
