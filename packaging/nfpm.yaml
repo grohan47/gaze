@@ -60,6 +60,9 @@ contents:
   - src: "packaging/pam/gaze"
     dst: "/usr/share/pam-configs/"
     packager: deb
+  - src: "packaging/pam/gaze-simultaneous"
+    dst: "/usr/share/pam-configs/"
+    packager: deb
   - src: "packaging/authselect/custom/gaze/"
     dst: "/usr/share/authselect/vendor/gaze/"
     packager: rpm
@@ -72,6 +75,10 @@ deb:
 rpm:
   signature:
     key_file: "${NFPM_SIGNING_KEY_FILE}"
+
+archlinux:
+  scripts:
+    postupgrade: "packaging/postinst-arch.sh"
 
 overrides:
   deb:
