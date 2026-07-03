@@ -195,10 +195,11 @@ impl Camera {
             .downcast::<gstreamer_app::AppSink>()
             .map_err(|_| anyhow::anyhow!("gaze_sink is not an AppSink"))?;
 
+        // Pin only height and PAR: adding width squishes 16:9 to 4:3; dropping PAR stretches it.
         let caps = gstreamer::Caps::builder("video/x-raw")
             .field("format", "BGR")
-            .field("width", 640)
             .field("height", 480)
+            .field("pixel-aspect-ratio", gstreamer::Fraction::new(1, 1))
             .build();
         appsink.set_caps(Some(&caps));
 
@@ -441,6 +442,22 @@ mod tests {
                 source: "/dev/video2".to_string(),
                 node: "/dev/video2".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn open_scales_widescreen_to_square_pixels() {
+        let mut camera = Camera::open(
+            "videotestsrc num-buffers=3 ! capsfilter caps=video/x-raw,width=1280,height=720",
+        )
+        .expect("videotestsrc pipeline");
+        let frame = camera.next().expect("videotestsrc frame");
+        assert_eq!(frame.rows(), 480);
+        // Without the PAR pin videoscale keeps the source width (1280x480 at PAR 2/3).
+        let cols = frame.cols();
+        assert!(
+            (853..=854).contains(&cols),
+            "expected aspect-preserving width, got {cols}"
         );
     }
 

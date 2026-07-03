@@ -22,6 +22,7 @@ impl LivenessDetector {
         Ok(Self { session })
     }
 
+    // MiniFASNet expects BGR in raw 0-255 (upstream's ToTensor skips /255); RGB breaks scoring.
     fn pre_process(img: &RgbImage) -> Array4<f32> {
         let scaled = resize(img, INPUT_SIZE, INPUT_SIZE, FilterType::Triangle);
         let size = INPUT_SIZE as usize;
@@ -35,9 +36,9 @@ impl LivenessDetector {
             for x in 0..size {
                 let p = scaled.get_pixel(x as u32, y as u32);
                 let idx = y * size + x;
-                data[idx] = p[0] as f32;
+                data[idx] = p[2] as f32;
                 data[plane_len + idx] = p[1] as f32;
-                data[2 * plane_len + idx] = p[2] as f32;
+                data[2 * plane_len + idx] = p[0] as f32;
             }
         }
         tensor
@@ -203,12 +204,12 @@ mod tests {
     }
 
     #[test]
-    fn pre_process_outputs_nchw_rgb_tensor_in_byte_range() {
+    fn pre_process_outputs_nchw_bgr_tensor_in_byte_range() {
         let img = RgbImage::from_pixel(80, 80, Rgb([64, 128, 255]));
         let tensor = LivenessDetector::pre_process(&img);
-        assert!((tensor[[0, 0, 0, 0]] - 64.0).abs() < 1e-5);
+        assert!((tensor[[0, 0, 0, 0]] - 255.0).abs() < 1e-5);
         assert!((tensor[[0, 1, 0, 0]] - 128.0).abs() < 1e-5);
-        assert!((tensor[[0, 2, 0, 0]] - 255.0).abs() < 1e-5);
+        assert!((tensor[[0, 2, 0, 0]] - 64.0).abs() < 1e-5);
     }
 
     #[test]
